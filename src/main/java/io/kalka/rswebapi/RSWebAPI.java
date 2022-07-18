@@ -1,6 +1,7 @@
 package io.kalka.rswebapi;
 
 import com.google.gson.Gson;
+import com.mojang.datafixers.util.Pair;
 import com.mojang.logging.LogUtils;
 import com.refinedmods.refinedstorage.api.network.INetwork;
 import com.refinedmods.refinedstorage.api.util.StackListEntry;
@@ -11,6 +12,7 @@ import com.sun.net.httpserver.HttpServer;
 import net.minecraft.commands.Commands;
 import net.minecraft.nbt.Tag;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.item.ItemStack;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.RegisterCommandsEvent;
@@ -37,9 +39,14 @@ public class RSWebAPI {
 
     private static long startTime;
 
+    private long lastUpdate = 0;
+
+    private String json;
+
     public RSWebAPI() {
         IEventBus bus = MinecraftForge.EVENT_BUS;
         bus.addListener(this::onServerStarted);
+        bus.addListener(this::registerCommands);
     }
 
     private void registerCommands(RegisterCommandsEvent event) {
@@ -61,9 +68,18 @@ public class RSWebAPI {
     }
 
     private void handleContext(HttpExchange ctx) throws IOException {
+        ctx.getResponseHeaders().set("Content-Type", "application/json");
+        if (lastUpdate > System.currentTimeMillis()) {
+            ctx.sendResponseHeaders(200, json.length());
+            ctx.getResponseBody().write(json.getBytes());
+            ctx.close();
+            return;
+        }
         if (server == null) {
-            LOGGER.error("Could not get server :(");
-            ctx.sendResponseHeaders(500, 0);
+            String error = "Could not get server :(";
+            LOGGER.error(error);
+            ctx.sendResponseHeaders(500, error.length());
+            ctx.getResponseBody().write(error.getBytes());
             ctx.close();
             return;
         }
@@ -74,12 +90,24 @@ public class RSWebAPI {
 
         Map<String, Collection<Map<String, Object>>> networksMap = new HashMap<>();
 
-        long sum = 0L;
-        for (long l : server.tickTimes) {
-            sum += l;
+        Map<String, Map<String, Object>> dimensionsMap = new HashMap<>();
+
+        for (ServerLevel world : server.getAllLevels()) {
+            Map<String, Object> tickTimes = new HashMap<>();
+            Pair<Integer, Double> worldTickTime = calculateTickTime(server.getTickTime(world.dimension()));
+            tickTimes.put("tps", worldTickTime.getFirst());
+            tickTimes.put("mean", worldTickTime.getSecond());
+            dimensionsMap.put(world.dimension().location().toString(), tickTimes);
         }
-        double mean = (sum / (double) server.tickTimes.length) * 1.0E-006D;
-        int tps = (int) Math.min(1000.0D / mean, 20);
+
+
+        Pair<Integer, Double> overall = calculateTickTime(server.tickTimes);
+
+
+
+
+        double mean = overall.getSecond();
+        int tps = overall.getFirst();
 
         for (INetwork network : networks) {
             Collection<StackListEntry<ItemStack>> list = network.getItemStorageCache().getList().getStacks();
@@ -133,14 +161,29 @@ public class RSWebAPI {
         context.put("tps", tps);
         context.put("uptime", System.currentTimeMillis() - startTime);
         context.put("mean", mean);
+        context.put("dimensions", dimensionsMap);
 
-        String json = new Gson().toJson(context);
-        ctx.getResponseHeaders().set("Content-Type", "application/json");
+        json = new Gson().toJson(context);
+
         ctx.sendResponseHeaders(200, json.length());
         ctx.getResponseBody().write(json.getBytes());
 
 
         ctx.close();
+        lastUpdate = System.currentTimeMillis() + 500;
+    }
+
+    private Pair<Integer, Double> calculateTickTime(long[] tickTimes) {
+        if (tickTimes == null) {
+            return Pair.of(0, 0.0D);
+        }
+        long sum = 0L;
+        for (long l : tickTimes) {
+            sum += l;
+        }
+        double mean = (sum / (double) tickTimes.length) * 1.0E-006D;
+        int tps = (int) Math.min(1000.0D / mean, 20);
+        return Pair.of(tps, mean);
     }
 
     private HttpServer createServer() throws IOException {
@@ -158,7 +201,6 @@ public class RSWebAPI {
     }
 
     public void onServerStarted(final ServerStartedEvent event) {
-        MinecraftForge.EVENT_BUS.addListener(this::registerCommands);
         server = event.getServer();
         startTime = System.currentTimeMillis();
         try {
