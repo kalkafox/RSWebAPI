@@ -137,6 +137,12 @@ repositories {
     maven {
         url = uri("https://maven.creeperhost.net")
     }
+    maven {
+        url "https://cursemaven.com"
+        content {
+            includeGroup "curse.maven"
+        }
+    }
 }
 dependencies {
     // Specify the version of Minecraft to use. If this is any group other than 'net.minecraft' it is assumed
@@ -146,6 +152,22 @@ dependencies {
 
     compileOnly "com.refinedmods:refinedstorage:1.10.2"
     runtimeOnly fg.deobf("com.refinedmods:refinedstorage:1.10.2") {
+        transitive false
+    }
+
+    runtimeOnly fg.deobf("com.github.mcjty:mcjtylib:1.18-6.0.15.26") {
+        transitive false
+    }
+
+    runtimeOnly fg.deobf("curse.maven:rftools-base-326041:3825686") {
+        transitive false
+    }
+
+    runtimeOnly fg.deobf("curse.maven:rftools-power-290209:3783991") {
+        transitive false
+    }
+
+    runtimeOnly fg.deobf("curse.maven:rftools-builder-347706:3841160") {
         transitive false
     }
 

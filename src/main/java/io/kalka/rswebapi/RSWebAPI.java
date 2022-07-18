@@ -8,24 +8,21 @@ import com.refinedmods.refinedstorage.apiimpl.API;
 import com.sun.net.httpserver.HttpContext;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
-import net.minecraft.client.Minecraft;
 import net.minecraft.commands.Commands;
 import net.minecraft.nbt.Tag;
-import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.item.ItemStack;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.RegisterCommandsEvent;
 import net.minecraftforge.event.server.ServerStartedEvent;
-import net.minecraftforge.eventbus.api.SubscribeEvent;
+import net.minecraftforge.eventbus.api.IEventBus;
 import net.minecraftforge.fml.common.Mod;
-import net.minecraftforge.event.server.ServerStartingEvent;
-import net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext;
-import net.minecraftforge.fml.util.thread.SidedThreadGroups;
 import org.slf4j.Logger;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.util.*;
+
 
 // The value here should match an entry in the META-INF/mods.toml file
 @Mod("rswebapi")
@@ -34,22 +31,25 @@ public class RSWebAPI {
     // Directly reference a slf4j logger
     private static final Logger LOGGER = LogUtils.getLogger();
 
-    private ServerLevel overworld;
+    private MinecraftServer server;
 
-    private HttpServer server;
+    private HttpServer httpServer;
+
+    private static long startTime;
 
     public RSWebAPI() {
-        MinecraftForge.EVENT_BUS.addListener(this::onServerStarted);
+        IEventBus bus = MinecraftForge.EVENT_BUS;
+        bus.addListener(this::onServerStarted);
     }
 
     private void registerCommands(RegisterCommandsEvent event) {
         event.getDispatcher().register(Commands.literal("rswebapi").then(Commands.literal("reload").executes(context -> {
-            if (server == null) {
+            if (httpServer == null) {
                 LOGGER.error("The server is not started!");
                 return 0;
             }
             LOGGER.info("Restarting server");
-            server.stop(0);
+            httpServer.stop(0);
             try {
                 startServer();
                 LOGGER.info("Started!");
@@ -61,31 +61,39 @@ public class RSWebAPI {
     }
 
     private void handleContext(HttpExchange ctx) throws IOException {
-        // get server world
-        if (overworld == null) {
-            LOGGER.error("Could not get world :(");
+        if (server == null) {
+            LOGGER.error("Could not get server :(");
             ctx.sendResponseHeaders(500, 0);
             ctx.close();
             return;
         }
 
-        Collection<INetwork> networks = API.instance().getNetworkManager(overworld).all();
+        Collection<INetwork> networks = API.instance().getNetworkManager(server.overworld()).all();
 
-        Map<String, Map<String, Integer>> networksMap = new HashMap<>();
+        Map<String, Object> context = new HashMap<>();
+
+        Map<String, Collection<Map<String, Object>>> networksMap = new HashMap<>();
+
+        long sum = 0L;
+        for (long l : server.tickTimes) {
+            sum += l;
+        }
+        double mean = (sum / (double) server.tickTimes.length) * 1.0E-006D;
+        int tps = (int) Math.min(1000.0D / mean, 20);
 
         for (INetwork network : networks) {
             Collection<StackListEntry<ItemStack>> list = network.getItemStorageCache().getList().getStacks();
 
-            Map<String, Integer> stacks = new HashMap<>();
+            Collection<Map<String, Object>> stacks = new ArrayList<>();
 
             for (StackListEntry<ItemStack> entry : list) {
                 ItemStack stack = entry.getStack();
                 if (stack.getTag() == null) {
-                    break;
+                    continue;
                 }
                 Tag name = stack.getTag().get("display");
                 if (name == null) {
-                    break;
+                    continue;
                 }
                 if (name.getAsString().contains("rsweb")) {
                     String id = name.getAsString().replace("{Name:'{\"text\":\"rsweb", "").replace("\"}'}", "");
@@ -100,15 +108,33 @@ public class RSWebAPI {
                     }
                     LOGGER.info("Found rsweb-{}", filteredId);
                     for (StackListEntry<ItemStack> items : list) {
-                        stacks.put(Objects.requireNonNull(items.getStack().getItem().getRegistryName()).toString(), items.getStack().getCount());
+                        Map<String, Object> item = new HashMap<>();
+                        List<String> itemTags = new ArrayList<>();
+
+                        items.getStack().getTags().toList().forEach(tag -> {
+                            itemTags.add(tag.location().toString());
+                        });
+
+
+                        LOGGER.info("tags: {}", itemTags);
+                        item.put("id", Objects.requireNonNull(items.getStack().getItem().getRegistryName()).toString());
+                        item.put("count", items.getStack().getCount());
+                        item.put("tags", itemTags);
+                        stacks.add(item);
                     }
+                    LOGGER.info(String.valueOf(stacks));
                     networksMap.put(filteredId, stacks);
                     break;
                 }
             }
         }
 
-        String json = new Gson().toJson(networksMap);
+        context.put("networks", networksMap);
+        context.put("tps", tps);
+        context.put("uptime", System.currentTimeMillis() - startTime);
+        context.put("mean", mean);
+
+        String json = new Gson().toJson(context);
         ctx.getResponseHeaders().set("Content-Type", "application/json");
         ctx.sendResponseHeaders(200, json.length());
         ctx.getResponseBody().write(json.getBytes());
@@ -118,23 +144,23 @@ public class RSWebAPI {
     }
 
     private HttpServer createServer() throws IOException {
-        HttpServer server = HttpServer.create(new InetSocketAddress("localhost", 8989), 0);
-        HttpContext context = server.createContext("/");
+        HttpServer httpServer = HttpServer.create(new InetSocketAddress(8989), 0);
+        HttpContext context = httpServer.createContext("/");
         context.setHandler(this::handleContext);
-        server.setExecutor(null); // creates a default executor
-        return server;
+        httpServer.setExecutor(null); // creates a default executor
+        return httpServer;
     }
 
     private void startServer() throws IOException {
         // A new HTTP server instance is created because we cannot reuse the same server instance incase of a restart
-        server = createServer();
-        server.start();
+        httpServer = createServer();
+        httpServer.start();
     }
 
     public void onServerStarted(final ServerStartedEvent event) {
         MinecraftForge.EVENT_BUS.addListener(this::registerCommands);
-        overworld = event.getServer().overworld();
-        LOGGER.info("HELLO from server starting");
+        server = event.getServer();
+        startTime = System.currentTimeMillis();
         try {
             LOGGER.info("Starting RSWebAPI http server...");
             startServer();
